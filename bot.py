@@ -20,9 +20,13 @@ bot = Bot(token=config.TG_BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
+# Кэш для публикаций из парсера и кастомных текстов
 REWRITE_CACHE = {}
+CUSTOM_TEXT_CACHE = {}
+CUSTOM_PUB_CACHE = {}
 
 def get_post_keyboard(post_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура стилей для поста из парсера."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="💼 Эксперт", callback_data=f"rw_{post_id}_expert"),
@@ -38,6 +42,7 @@ def get_post_keyboard(post_id: int) -> InlineKeyboardMarkup:
     ])
 
 def get_publish_keyboard(post_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура публикации для спарсенного поста."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📢 Опубликовать в канал", callback_data=f"pub_{post_id}")
@@ -48,17 +53,44 @@ def get_publish_keyboard(post_id: int) -> InlineKeyboardMarkup:
         ]
     ])
 
+def get_custom_text_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура стилей для своего текста."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💼 Эксперт", callback_data="crw_expert"),
+            InlineKeyboardButton(text="⚡️ TL;DR", callback_data="crw_tldr")
+        ],
+        [
+            InlineKeyboardButton(text="🔥 Дерзкий", callback_data="crw_provocative"),
+            InlineKeyboardButton(text="🧵 Гайд", callback_data="crw_guide")
+        ]
+    ])
+
+def get_custom_publish_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура публикации своего текста."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📢 Опубликовать в канал", callback_data="cpub_send")
+        ],
+        [
+            InlineKeyboardButton(text="🔄 Другой стиль", callback_data="cback_styles")
+        ]
+    ])
+
 async def send_next_post_card(chat_id: int) -> None:
+    """Отправка карточки следующего отобранного поста."""
     chosen_posts = await db.get_chosen_posts()
     if not chosen_posts:
         await bot.send_message(
             chat_id, 
-            "🎉 <b>Все отобранные посты обработаны!</b>", 
+            "🎉 <b>Все отобранные посты обработаны!</b>\nНовые появятся при следующем автопарсинге.", 
             parse_mode=ParseMode.HTML
         )
         return
 
     post = chosen_posts[0]
+    total_left = len(chosen_posts)
+    
     main_idea = "Не указана"
     why = "Не указано"
     if post.get("ai_analysis"):
@@ -80,14 +112,14 @@ async def send_next_post_card(chat_id: int) -> None:
         clean_text = clean_text[:800] + "...\n<i>(текст сокращен)</i>"
 
     card_text = (
-        f"📌 <b>Пост #{post['id']}</b>\n"
+        f"📌 <b>Пост #{post['id']}</b>  <i>(В очереди: {total_left})</i>\n"
         f"📢 <b>Канал:</b> {html.escape(str(channel_name))} (@{channel_user})\n"
         f"📊 <b>ER:</b> {post['er']:.2f}%\n"
         f"💡 <b>Суть:</b> {html.escape(str(main_idea))}\n"
         f"❓ <b>Почему выбран:</b> {html.escape(str(why))}\n"
         f"{link_html}\n"
         f"📝 <b>Текст поста:</b>\n{clean_text}\n\n"
-        f"👇 <b>Выберите стиль рерайта:</b>"
+        f"👇 <b>В каком стиле сделать рерайт?</b>"
     )
 
     await bot.send_message(
@@ -105,22 +137,98 @@ async def cmd_start(message: Message):
 
     is_owner = (message.from_user.id == config.ADMIN_ID)
     welcome_text = (
-        "🤖 <b>Панель управления ИИ-Куратором</b>\n\n"
-        "<b>Работа с контентом:</b>\n"
-        "➕ <code>/add_channel &lt;username&gt;</code> — добавить канал\n"
+        "🤖 <b>ИИ-Куратор и Копирайтер контента</b>\n\n"
+        "<b>Команды:</b>\n"
+        "➕ <code>/add_channel &lt;username&gt;</code> — добавить канал для мониторинга\n"
         "🗑 <code>/del_channel &lt;username&gt;</code> — удалить канал\n"
         "📋 <code>/channels</code> — список каналов\n"
         "📢 <code>/set_channel &lt;@username&gt;</code> — канал для публикаций\n"
-        "🚀 <code>/start_parsing</code> — запустить парсинг\n"
+        "🚀 <code>/start_parsing</code> — запустить парсинг и ИИ-отбор\n\n"
+        "✍️ <b>Рерайт своего текста:</b> просто отправьте или перешлите мне любой текст сообщением!"
     )
     if is_owner:
         welcome_text += (
-            "\n👑 <b>Управление доступом:</b>\n"
+            "\n\n👑 <b>Управление доступом:</b>\n"
             "👤 <code>/add_admin &lt;ID&gt;</code> — выдать доступ\n"
             "❌ <code>/del_admin &lt;ID&gt;</code> — забрать доступ\n"
-            "👥 <code>/admins</code> — список админов\n"
+            "👥 <code>/admins</code> — список админов"
         )
     await message.answer(welcome_text, parse_mode=ParseMode.HTML)
+
+# --- Рерайт своего текста ---
+
+@router.message(F.text & ~F.text.startswith("/"))
+async def handle_custom_user_text(message: Message):
+    """Обработка любого присланного текста от админа."""
+    if not await db.is_user_authorized(message.from_user.id):
+        return
+
+    CUSTOM_TEXT_CACHE[message.from_user.id] = message.text
+    preview_len = len(message.text)
+    
+    await message.answer(
+        f"📝 <b>Текст принят ({preview_len} симв.)!</b>\n\n👇 Выберите стиль для рерайта:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_custom_text_keyboard()
+    )
+
+@router.callback_query(F.data.startswith("crw_"))
+async def handle_custom_rewrite(callback: CallbackQuery):
+    if not await db.is_user_authorized(callback.from_user.id):
+        return
+
+    style = callback.data.split("_")[1]
+    style_names = {
+        "expert": "💼 Экспертный",
+        "tldr": "⚡️ TL;DR",
+        "provocative": "🔥 Дерзкий",
+        "guide": "🧵 Гайд"
+    }
+
+    text = CUSTOM_TEXT_CACHE.get(callback.from_user.id)
+    if not text:
+        await callback.answer("❌ Текст устарел, отправьте его заново сообщением.", show_alert=True)
+        return
+
+    await callback.answer(f"⏳ Пишу в стиле: {style_names.get(style, '')}...")
+
+    rewritten_text = await analyzer.rewrite_post(text, style=style)
+    CUSTOM_PUB_CACHE[callback.from_user.id] = rewritten_text
+
+    result_text = f"✨ <b>Готовый пост ({style_names.get(style, '')}):</b>\n\n{html.escape(rewritten_text)}"
+    await callback.message.answer(
+        result_text, 
+        parse_mode=ParseMode.HTML, 
+        reply_markup=get_custom_publish_keyboard()
+    )
+
+@router.callback_query(F.data == "cpub_send")
+async def handle_custom_publish(callback: CallbackQuery):
+    if not await db.is_user_authorized(callback.from_user.id):
+        return
+
+    text_to_publish = CUSTOM_PUB_CACHE.get(callback.from_user.id)
+    target_channel = await db.get_setting("target_channel") or config.TARGET_CHANNEL
+
+    if not target_channel:
+        await callback.answer("⚠️ Канал не привязан! Настройте через /set_channel @channel", show_alert=True)
+        return
+    if not text_to_publish:
+        await callback.answer("❌ Текст устарел.", show_alert=True)
+        return
+
+    try:
+        await bot.send_message(chat_id=target_channel, text=text_to_publish, parse_mode=ParseMode.HTML)
+        await callback.answer("🎉 Пост опубликован в канал!", show_alert=True)
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка публикации: {e}", show_alert=True)
+
+@router.callback_query(F.data == "cback_styles")
+async def handle_custom_back(callback: CallbackQuery):
+    await callback.message.edit_reply_markup(reply_markup=get_custom_text_keyboard())
+
+# --- Управление доступом ---
 
 @router.message(Command("add_admin"))
 async def cmd_add_admin(message: Message, command: CommandObject):
@@ -163,6 +271,8 @@ async def cmd_list_admins(message: Message):
     else:
         text += "👥 Дополнительных администраторов пока нет."
     await message.answer(text, parse_mode=ParseMode.HTML)
+
+# --- Настройки каналов ---
 
 @router.message(Command("set_channel"))
 async def cmd_set_channel(message: Message, command: CommandObject):
@@ -218,6 +328,8 @@ async def cmd_del_channel(message: Message, command: CommandObject):
     else:
         await message.answer(f"❌ Канал <b>@{html.escape(username)}</b> не найден.", parse_mode=ParseMode.HTML)
 
+# --- Парсинг и обработка очереди постов ---
+
 @router.message(Command("start_parsing"))
 async def cmd_start_parsing(message: Message):
     if not await db.is_user_authorized(message.from_user.id):
@@ -252,6 +364,9 @@ async def handle_rewrite_style(callback: CallbackQuery):
 
     rewritten_text = await analyzer.rewrite_post(post["text"], style=style)
     REWRITE_CACHE[post_id] = rewritten_text
+    
+    # Сразу переводим пост в статус rewritten, чтобы очередь продвигалась к следующему посту
+    await db.update_post_status(post_id, "rewritten")
 
     result_text = f"✨ <b>Готовый пост ({style_names.get(style, '')}):</b>\n\n{html.escape(rewritten_text)}"
     await callback.message.answer(result_text, parse_mode=ParseMode.HTML, reply_markup=get_publish_keyboard(post_id))
@@ -276,6 +391,7 @@ async def handle_publish(callback: CallbackQuery):
         await db.update_post_status(post_id, "published")
         await callback.answer("🎉 Опубликовано в канал!", show_alert=True)
         await callback.message.edit_reply_markup(reply_markup=None)
+        # Переходим к следующему посту из очереди
         await send_next_post_card(callback.message.chat.id)
     except Exception as e:
         await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
@@ -283,6 +399,8 @@ async def handle_publish(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("back_"))
 async def handle_back_to_styles(callback: CallbackQuery):
     post_id = int(callback.data.split("_")[1])
+    # Возвращаем пост в статус chosen для смены стиля
+    await db.update_post_status(post_id, "chosen")
     await callback.message.edit_reply_markup(reply_markup=get_post_keyboard(post_id))
 
 @router.callback_query(F.data.startswith("next_") | F.data.startswith("skip_"))
@@ -291,11 +409,12 @@ async def handle_skip_next(callback: CallbackQuery):
         return
     post_id = int(callback.data.split("_")[1])
     await db.update_post_status(post_id, "skipped")
-    await callback.answer("Пост пропущен")
+    await callback.answer("Пост пропущен, открываю следующий...")
     try:
         await callback.message.delete()
     except Exception:
         pass
+    # Мгновенно открываем следующий пост
     await send_next_post_card(callback.message.chat.id)
 
 async def auto_parser_loop():
@@ -322,12 +441,11 @@ async def main():
     dp.include_router(router)
     asyncio.create_task(auto_parser_loop())
     
-    # Запуск фонового веб-сервера активности
     try:
         await webserver.start_webserver()
-        logger.info("Веб-сервер активности успешно запущен!")
+        logger.info("Веб-сервер активности запущен!")
     except Exception as e:
-        logger.warning(f"Ошибка запуска веб-сервера: {e}")
+        logger.warning(f"Ошибка веб-сервера: {e}")
 
     logger.info("Запуск Telegram-бота...")
     await bot.delete_webhook(drop_pending_updates=True)
