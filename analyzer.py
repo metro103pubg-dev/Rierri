@@ -7,15 +7,18 @@ import database as db
 
 logger = logging.getLogger(__name__)
 
-# Проверенные модели Gemini
+# Точные модели из вашей панели Google AI Studio
 MODELS = [
-    "gemini-flash-latest",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-pro-latest"
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-flash-latest"
 ]
 
 async def send_gemini_request(payload: dict) -> dict:
-    """Отправка запроса с обработкой лимитов 429 и перегрузок 503."""
+    """Отправка запроса с быстрым переключением моделей."""
     headers = {
         "Content-Type": "application/json",
         "X-goog-api-key": config.OPENAI_API_KEY.strip()
@@ -25,9 +28,9 @@ async def send_gemini_request(payload: dict) -> dict:
     for model_name in MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
         
-        for attempt in range(4):
+        for attempt in range(2):
             try:
-                async with httpx.AsyncClient(timeout=45.0) as client:
+                async with httpx.AsyncClient(timeout=25.0) as client:
                     resp = await client.post(url, headers=headers, json=payload)
                     
                     if resp.status_code == 200:
@@ -36,21 +39,19 @@ async def send_gemini_request(payload: dict) -> dict:
                     if resp.status_code == 404:
                         break
                         
-                    if resp.status_code in (429, 503, 500):
-                        wait_sec = (attempt + 1) * 3
-                        logger.warning(f"[{model_name}] Ожидание лимита {wait_sec} сек...")
-                        await asyncio.sleep(wait_sec)
+                    if resp.status_code in (503, 429, 500):
+                        logger.warning(f"[{model_name}] Статус {resp.status_code}, быстрое переключение...")
+                        await asyncio.sleep(1.0)
                         continue
                         
                     resp.raise_for_status()
             except Exception as e:
                 last_error = e
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)
                 
     raise Exception(f"Все серверы Gemini временно заняты: {last_error}")
 
 async def evaluate_posts_batch(posts: list[dict]) -> dict:
-    """Отбор постов: отсев рекламы и гарантия отбора минимум 3 постов."""
     system_prompt = (
         "Ты — шеф-редактор Telegram-канала.\n"
         "1. Отсей рекламу, спам и мусор.\n"
@@ -81,7 +82,6 @@ async def evaluate_posts_batch(posts: list[dict]) -> dict:
         return {"results": []}
 
 async def rewrite_post(text: str, style: str = "expert") -> str:
-    """Генерация рерайта в выбранном стиле с 3 хуками."""
     style_prompts = {
         "expert": "СТИЛЬ: Экспертный, сжатый, фокус на пользе, цифрах и логике. Без занудства.",
         "tldr": "СТИЛЬ: TL;DR (Выжимка). Сверхкратко: 3-4 ключевых тезиса с эмодзи. Без воды.",
@@ -121,7 +121,6 @@ async def rewrite_post(text: str, style: str = "expert") -> str:
         return f"Не удалось выполнить рерайт: {e}"
 
 async def process_new_posts() -> int:
-    """Анализ новых постов с гарантией отбора не менее 3 штук."""
     posts = await db.get_unprocessed_posts()
     if not posts:
         return 0
