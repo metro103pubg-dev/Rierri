@@ -13,7 +13,9 @@ class Config:
         "OPENAI_BASE_URL", 
         "https://generativelanguage.googleapis.com/v1beta/openai/"
     )
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+    TARGET_CHANNEL: str = os.getenv("TARGET_CHANNEL", "")
+    TELETHON_SESSION: str = os.getenv("TELETHON_SESSION", "")
     DB_NAME: str = "curator_bot.db"
 
 config = Config()
