@@ -1,1 +1,1 @@
-web: python -u main.py
+worker: python bot.py
