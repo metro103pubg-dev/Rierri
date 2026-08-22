@@ -1,3 +1,4 @@
+import os
 import re
 import logging
 import httpx
@@ -10,14 +11,16 @@ import database as db
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Папка для загрузки фото для Vision
+os.makedirs("downloads", exist_ok=True)
+
 def clean_html_tags(raw_html: str) -> str:
-    """Удаление HTML-тегов из текста статей СМИ."""
     clean = re.compile('<.*?>')
     text = re.sub(clean, '', raw_html)
     return ' '.join(text.split())
 
-async def parse_tg_channels() -> int:
-    """Парсинг постов из Telegram-каналов."""
+async def parse_tg_channels(limit: int = 20) -> int:
+    """Парсинг постов с автоматическим скачиванием фото для Gemini Vision."""
     channels = await db.get_channels()
     if not channels:
         return 0
@@ -40,11 +43,30 @@ async def parse_tg_channels() -> int:
             channel_title = getattr(entity, 'title', username)
             await db.update_channel_title(channel['id'], channel_title)
 
-            messages = await client.get_messages(entity, limit=20)
+            messages = await client.get_messages(entity, limit=limit)
             for msg in messages:
-                text = getattr(msg, 'raw_text', '') or getattr(msg, 'message', '') or ""
-                if not text.strip():
+                raw_text = getattr(msg, 'raw_text', '') or getattr(msg, 'message', '') or ""
+                
+                media_tag = ""
+                media_path = None
+
+                # Скачиваем фото для передачи в Gemini Vision
+                if getattr(msg, 'photo', None):
+                    media_tag = "[📷 ФОТО] "
+                    try:
+                        media_path = await msg.download_media(file="downloads/")
+                    except Exception as e:
+                        logger.warning(f"Не удалось скачать фото: {e}")
+                elif getattr(msg, 'video', None):
+                    duration = getattr(msg.video, 'duration', 0)
+                    media_tag = f"[📹 ВИДЕО {duration}с] " if duration else "[📹 ВИДЕО] "
+                elif getattr(msg, 'gif', None) or getattr(msg, 'document', None):
+                    media_tag = "[📁 МЕДИА] "
+
+                if not raw_text.strip() and not media_tag:
                     continue
+
+                full_text = f"{media_tag}{raw_text}".strip()
 
                 reactions_count = sum(r.count for r in msg.reactions.results) if (getattr(msg, 'reactions', None) and msg.reactions.results) else 0
                 comments_count = msg.replies.replies if (getattr(msg, 'replies', None) and msg.replies.replies) else 0
@@ -59,7 +81,8 @@ async def parse_tg_channels() -> int:
                     source_type="tg",
                     source_name=channel_title,
                     post_url=post_url,
-                    text=text,
+                    text=full_text,
+                    media_path=media_path,
                     views=views_count,
                     reactions=reactions_count,
                     comments=comments_count,
@@ -69,13 +92,13 @@ async def parse_tg_channels() -> int:
                 if saved:
                     parsed_count += 1
         except Exception as e:
-            logger.error(f"Ошибка парсинга ТГ-канала {channel.get('username')}: {e}")
+            logger.error(f"Ошибка парсинга ТГ {channel.get('username')}: {e}")
 
     await client.disconnect()
     return parsed_count
 
-async def parse_media_sites() -> int:
-    """Парсинг свежих новостей из сайтов и СМИ через RSS."""
+async def parse_media_sites(limit: int = 20) -> int:
+    """Парсинг статей из СМИ через RSS."""
     sources = await db.get_media_sources()
     if not sources:
         return 0
@@ -91,7 +114,7 @@ async def parse_media_sites() -> int:
                     continue
 
                 feed = feedparser.parse(resp.text)
-                for entry in feed.entries[:10]:
+                for entry in feed.entries[:limit]:
                     title = entry.get('title', '').strip()
                     summary = clean_html_tags(entry.get('summary', '') or entry.get('description', ''))
                     link = entry.get('link', '').strip()
@@ -100,7 +123,6 @@ async def parse_media_sites() -> int:
                     if len(full_text) < 50:
                         continue
 
-                    # Для СМИ ставим базовый приоритетный ER
                     saved = await db.save_post(
                         channel_id=None,
                         msg_id=None,
@@ -108,6 +130,7 @@ async def parse_media_sites() -> int:
                         source_name=src['name'],
                         post_url=link,
                         text=full_text,
+                        media_path=None,
                         views=1000,
                         reactions=50,
                         comments=10,
@@ -120,11 +143,12 @@ async def parse_media_sites() -> int:
 
     return parsed_count
 
-async def run_parser(mode: str = "all") -> int:
-    """Главная функция запуска парсинга в зависимости от выбранного режима."""
+async def run_parser(mode: str = "all", limit: int = 20) -> int:
+    """Главная функция сбора."""
+    safe_limit = min(max(1, limit), 150)
     total = 0
     if mode in ("all", "tg"):
-        total += await parse_tg_channels()
+        total += await parse_tg_channels(limit=safe_limit)
     if mode in ("all", "media"):
-        total += await parse_media_sites()
+        total += await parse_media_sites(limit=safe_limit)
     return total
