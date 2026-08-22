@@ -2,6 +2,7 @@ import aiosqlite
 from config import config
 
 async def init_db() -> None:
+    """Инициализация базы данных и таблиц."""
     async with aiosqlite.connect(config.DB_NAME) as db:
         await db.execute("PRAGMA foreign_keys = ON;")
         
@@ -47,6 +48,7 @@ async def init_db() -> None:
                 source_name TEXT,
                 post_url TEXT,
                 text TEXT NOT NULL,
+                media_path TEXT,
                 views INTEGER NOT NULL DEFAULT 0,
                 reactions INTEGER NOT NULL DEFAULT 0,
                 comments INTEGER NOT NULL DEFAULT 0,
@@ -58,23 +60,14 @@ async def init_db() -> None:
             )
         """)
         
-        # Миграция существующих таблиц
         try:
-            await db.execute("ALTER TABLE posts ADD COLUMN source_type TEXT DEFAULT 'tg';")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE posts ADD COLUMN source_name TEXT;")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE posts ADD COLUMN post_url TEXT;")
+            await db.execute("ALTER TABLE posts ADD COLUMN media_path TEXT;")
         except Exception:
             pass
 
         await db.commit()
 
-# --- Управление СМИ источниками ---
+# --- Управление СМИ и сайтами ---
 
 async def add_media_source(name: str, url: str, category: str = "") -> bool:
     async with aiosqlite.connect(config.DB_NAME) as db:
@@ -141,6 +134,7 @@ async def save_post(
     channel_id: int | None, 
     msg_id: int | None, 
     text: str, 
+    media_path: str | None = None,
     views: int = 0, 
     reactions: int = 0, 
     comments: int = 0, 
@@ -155,10 +149,10 @@ async def save_post(
             await db.execute(
                 """
                 INSERT OR IGNORE INTO posts 
-                (channel_id, msg_id, source_type, source_name, post_url, text, views, reactions, comments, er, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', COALESCE(?, CURRENT_TIMESTAMP))
+                (channel_id, msg_id, source_type, source_name, post_url, text, media_path, views, reactions, comments, er, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', COALESCE(?, CURRENT_TIMESTAMP))
                 """,
-                (channel_id, msg_id, source_type, source_name, post_url, text, views, reactions, comments, er, created_at)
+                (channel_id, msg_id, source_type, source_name, post_url, text, media_path, views, reactions, comments, er, created_at)
             )
             await db.commit()
             return True
